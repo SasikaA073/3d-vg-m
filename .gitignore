@@ -5,3 +5,8 @@ data
 checkpoints
 weights
 __pycache__
+*.pyc
+*.egg-info/
+.eggs/
+wandb
+logs

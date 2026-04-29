@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "3d-vg",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--config",
+                "configs/train.yaml"
+            ],
+            "console": "integratedTerminal",
+            "python": "/home/avishka/anaconda3/envs/sonata/bin/python"
+        }
+    ]
+}

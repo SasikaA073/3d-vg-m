@@ -1,0 +1,51 @@
+# 3D Visual Grounding - Training Configuration
+
+data:
+  train_scanrefer_path: "/home/avishka/sasika/grounding/3d/new_data/scanrefer/ScanRefer_filtered_train.json"
+  val_scanrefer_path: "/home/avishka/sasika/grounding/3d/new_data/scanrefer/ScanRefer_filtered_val.json"
+  scannet_dir: "/home/avishka/sasika/grounding/3d/new_data/data/scannet"
+  num_points: 40000
+
+point_encoder:
+  ckpt_path: "POINTENCODER/weights/dVAE.pth"
+  freeze_encoder: false
+  encoder_dim: 256
+  group_size: 32
+  num_group: 64
+
+transformer:
+  embed_dim: 768
+  depth: 4
+  num_heads: 12
+  mlp_ratio: 4.0
+  qkv_bias: false
+  qk_scale: null
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+
+model:
+  point_feat_dim: 512
+  hidden_dim: 256
+  text_model_name: "distilbert-base-uncased"
+
+training:
+  batch_size: 500
+  epochs: 400
+  device: "cuda"
+  num_workers: 1
+
+  optimizer:
+    lr: 1.0e-3
+    point_encoder_lr: 1.0e-4
+    text_encoder_lr: 5.0e-5
+
+  save_dir: "checkpoints"
+  log_interval: 50
+  checkpoint_every: 10
+
+wandb:
+  enabled: true
+  project: "3d-visual-grounding"
+  entity: null
+  run_name: null
