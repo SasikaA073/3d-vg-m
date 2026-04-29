@@ -4,3 +4,4 @@ new_data
 data
 checkpoints
 weights
+__pycache__
