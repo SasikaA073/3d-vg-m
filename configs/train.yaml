@@ -30,10 +30,10 @@ model:
   text_model_name: "distilbert-base-uncased"
 
 training:
-  batch_size: 500
+  batch_size: 400
   epochs: 400
   device: "cuda"
-  num_workers: 1
+  num_workers: 4
 
   optimizer:
     lr: 1.0e-3

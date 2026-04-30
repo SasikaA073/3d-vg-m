@@ -27,9 +27,13 @@ def setup_logging():
     )
 
 
-def train_one_epoch(model, loader, optimizer, epoch, device, log_interval=50):
+def train_one_epoch(model, loader, optimizer, epoch, device, log_interval=50, use_wandb=False, val_batches=0):
     model.train()
     running_loss = 0.0
+    running_center_loss = 0.0
+    running_size_loss = 0.0
+    # Account for both train and val batches per epoch to avoid step overlap
+    global_step_base = epoch * (len(loader) + val_batches)
 
     for batch_idx, batch in enumerate(loader):
         point_clouds = batch["point_cloud"].to(device)
@@ -47,7 +51,10 @@ def train_one_epoch(model, loader, optimizer, epoch, device, log_interval=50):
 
         loss.backward()
         optimizer.step()
+
         running_loss += loss.item()
+        running_center_loss += l_center.item()
+        running_size_loss += l_size.item()
 
         if batch_idx % log_interval == 0:
             logger.info(
@@ -56,18 +63,39 @@ def train_one_epoch(model, loader, optimizer, epoch, device, log_interval=50):
                 f"Size: {l_size.item():.4f})"
             )
 
-    return running_loss / len(loader)
+        # Batch-level wandb logging
+        if use_wandb:
+            global_step = global_step_base + batch_idx
+            wandb.log(
+                {
+                    "train_batch/loss": loss.item(),
+                    "train_batch/center_loss": l_center.item(),
+                    "train_batch/size_loss": l_size.item(),
+                },
+                step=global_step,
+            )
+
+    n_batches = len(loader)
+    return {
+        "loss": running_loss / n_batches,
+        "center_loss": running_center_loss / n_batches,
+        "size_loss": running_size_loss / n_batches,
+    }
 
 
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, epoch=0, use_wandb=False, train_batches=0):
     model.eval()
     val_loss = 0.0
+    val_center_loss = 0.0
+    val_size_loss = 0.0
     iou_sum = 0.0
     iou_25_correct = 0
     total_samples = 0
+    # Validation steps start after training steps within the same epoch
+    global_step_base = epoch * (train_batches + len(loader)) + train_batches
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader):
         point_clouds = batch["point_cloud"].to(device)
         gt_centers = batch["gt_box_center"].to(device)
         gt_sizes = batch["gt_box_size"].to(device)
@@ -75,19 +103,37 @@ def validate(model, loader, device):
 
         pred_centers, pred_sizes = model(point_clouds, texts)
 
-        loss, _, _ = grounding_loss(pred_centers, gt_centers, pred_sizes, gt_sizes)
+        loss, l_center, l_size = grounding_loss(pred_centers, gt_centers, pred_sizes, gt_sizes)
         val_loss += loss.item()
+        val_center_loss += l_center.item()
+        val_size_loss += l_size.item()
 
         batch_ious = compute_3d_iou(pred_centers, pred_sizes, gt_centers, gt_sizes)
         iou_sum += batch_ious.sum().item()
         iou_25_correct += (batch_ious >= 0.25).sum().item()
         total_samples += gt_centers.size(0)
 
-    avg_loss = val_loss / len(loader)
-    mean_iou = iou_sum / total_samples
-    acc_25 = iou_25_correct / total_samples
+        # Batch-level wandb logging
+        if use_wandb:
+            global_step = global_step_base + batch_idx
+            wandb.log(
+                {
+                    "val_batch/loss": loss.item(),
+                    "val_batch/center_loss": l_center.item(),
+                    "val_batch/size_loss": l_size.item(),
+                    "val_batch/mean_iou": batch_ious.mean().item(),
+                },
+                step=global_step,
+            )
 
-    return avg_loss, mean_iou, acc_25
+    n_batches = len(loader)
+    return {
+        "loss": val_loss / n_batches,
+        "center_loss": val_center_loss / n_batches,
+        "size_loss": val_size_loss / n_batches,
+        "mean_iou": iou_sum / total_samples,
+        "acc_at_025": iou_25_correct / total_samples,
+    }
 
 
 def save_checkpoint(model, optimizer, epoch, best_iou, path):
@@ -133,19 +179,26 @@ def main(cfg):
     )
     logger.info(f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
 
+    num_workers = cfg.training.num_workers
+    use_persistent_workers = num_workers > 0
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=cfg.training.num_workers,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=use_persistent_workers,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
         drop_last=False,
-        num_workers=cfg.training.num_workers,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=use_persistent_workers,
     )
     logger.info(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
@@ -245,34 +298,57 @@ def main(cfg):
     logger.info(f"Starting training for {cfg.training.epochs} epochs...")
     logger.info(f"Checkpoints will be saved to: {save_dir}")
 
+    use_wandb = cfg.wandb.enabled
+
     for epoch in range(cfg.training.epochs):
         logger.info(f"[Epoch {epoch + 1}/{cfg.training.epochs}] Training...")
-        avg_train_loss = train_one_epoch(
+        train_metrics = train_one_epoch(
             vg_model, train_loader, optimizer, epoch, device,
             log_interval=cfg.training.log_interval,
+            use_wandb=use_wandb,
+            val_batches=len(val_loader),
         )
 
         logger.info(f"[Epoch {epoch + 1}/{cfg.training.epochs}] Validating...")
-        avg_val_loss, mean_iou, acc_25 = validate(vg_model, val_loader, device)
+        val_metrics = validate(
+            vg_model, val_loader, device,
+            epoch=epoch,
+            use_wandb=use_wandb,
+            train_batches=len(train_loader),
+        )
 
         logger.info(f"[Epoch {epoch + 1}/{cfg.training.epochs}] Summary:")
-        logger.info(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-        logger.info(f"  Val Mean IoU: {mean_iou:.4f} | Val Acc@0.25: {acc_25:.4f}")
+        logger.info(
+            f"  Train Loss: {train_metrics['loss']:.4f} "
+            f"(Center: {train_metrics['center_loss']:.4f}, Size: {train_metrics['size_loss']:.4f})"
+        )
+        logger.info(
+            f"  Val Loss: {val_metrics['loss']:.4f} "
+            f"(Center: {val_metrics['center_loss']:.4f}, Size: {val_metrics['size_loss']:.4f})"
+        )
+        logger.info(f"  Val Mean IoU: {val_metrics['mean_iou']:.4f} | Val Acc@0.25: {val_metrics['acc_at_025']:.4f}")
 
-        # --- Wandb logging ---
-        if cfg.wandb.enabled:
+        # --- Epoch-level wandb logging ---
+        if use_wandb:
+            # Use a consistent step: last step of this epoch (end of validation)
+            epoch_step = (epoch + 1) * (len(train_loader) + len(val_loader)) - 1
             wandb.log(
                 {
                     "epoch": epoch,
-                    "train/loss": avg_train_loss,
-                    "val/loss": avg_val_loss,
-                    "val/mean_iou": mean_iou,
-                    "val/acc_at_025": acc_25,
+                    "train/loss": train_metrics["loss"],
+                    "train/center_loss": train_metrics["center_loss"],
+                    "train/size_loss": train_metrics["size_loss"],
+                    "val/loss": val_metrics["loss"],
+                    "val/center_loss": val_metrics["center_loss"],
+                    "val/size_loss": val_metrics["size_loss"],
+                    "val/mean_iou": val_metrics["mean_iou"],
+                    "val/acc_at_025": val_metrics["acc_at_025"],
                 },
-                step=epoch,
+                step=epoch_step,
             )
 
         # --- Save best model ---
+        mean_iou = val_metrics["mean_iou"]
         if mean_iou > best_val_iou:
             best_val_iou = mean_iou
             best_path = os.path.join(save_dir, "best_grounding_model.pth")
